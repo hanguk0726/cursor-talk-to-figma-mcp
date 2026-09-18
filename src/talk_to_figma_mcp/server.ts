@@ -5,7 +5,8 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { z } from "zod";
 import WebSocket from "ws";
 import { v4 as uuidv4 } from "uuid";
-import { readFile } from "fs/promises";
+import { readFile, writeFile, mkdir } from "fs/promises";
+import { dirname } from "path";
 
 // Define TypeScript interfaces for Figma responses
 interface FigmaResponse {
@@ -863,8 +864,14 @@ server.tool(
       .optional()
       .describe("Export format"),
     scale: z.number().positive().optional().describe("Export scale"),
+    savePath: z
+      .string()
+      .optional()
+      .describe(
+        "Absolute file path to write the exported image to on disk. When set, the image bytes are saved to this path (parent dirs created) and a text result with the path is returned instead of the inline image — enabling file-based pipelines (e.g. SSIM gate) with no manual step."
+      ),
   },
-  async ({ nodeId, format, scale }: any) => {
+  async ({ nodeId, format, scale, savePath }: any) => {
     try {
       const result = await sendCommandToFigma("export_node_as_image", {
         nodeId,
@@ -872,6 +879,37 @@ server.tool(
         scale: scale || 1,
       });
       const typedResult = result as { imageData: string; mimeType: string };
+
+      // savePath given → decode base64 and write to disk, return the path (file-based pipelines).
+      if (savePath) {
+        try {
+          await mkdir(dirname(savePath), { recursive: true });
+          await writeFile(savePath, Buffer.from(typedResult.imageData, "base64"));
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Exported node ${nodeId} to ${savePath} (${typedResult.mimeType || "image/png"})`,
+              },
+            ],
+          };
+        } catch (writeErr) {
+          // Fall back to inline image if disk write fails (backwards-compatible).
+          return {
+            content: [
+              {
+                type: "text",
+                text: `Failed to write ${savePath}: ${writeErr instanceof Error ? writeErr.message : String(writeErr)}. Returning inline image instead.`,
+              },
+              {
+                type: "image",
+                data: typedResult.imageData,
+                mimeType: typedResult.mimeType || "image/png",
+              },
+            ],
+          };
+        }
+      }
 
       return {
         content: [
